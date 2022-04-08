@@ -1,23 +1,43 @@
 //! Implementation details of `#[pymodule]` which need to be accessible from proc-macro generated code.
 
 use std::cell::UnsafeCell;
+#[cfg(all(feature = "pep489", not(PyPy)))]
+use {std::ffi::CStr, std::os::raw::c_void};
 
-use crate::{
-    callback::panic_result_into_callback_output, ffi, types::PyModule, GILPool, IntoPyPointer, Py,
-    PyObject, PyResult, Python,
-};
+#[cfg(any(not(feature = "pep489"), PyPy))]
+use crate::{callback::panic_result_into_callback_output, GILPool, IntoPyPointer};
+use crate::{ffi, types::PyModule, Py, PyObject, PyResult, Python};
+#[cfg(all(feature = "pep489", not(PyPy)))]
+use crate::{AsPyPointer, PyErr};
+
+/// `Sync` wrapper of `ffi::PyModuleDef_Slot`
+#[cfg(all(feature = "pep489", not(PyPy)))]
+#[repr(transparent)]
+pub struct ModuleDefSlot(ffi::PyModuleDef_Slot);
+
+#[cfg(all(feature = "pep489", not(PyPy)))]
+unsafe impl Sync for ModuleDefSlot {}
 
 /// `Sync` wrapper of `ffi::PyModuleDef`.
 pub struct ModuleDef {
     // wrapped in UnsafeCell so that Rust compiler treats this as interior mutability
     ffi_def: UnsafeCell<ffi::PyModuleDef>,
+    #[cfg(any(not(feature = "pep489"), PyPy))]
     initializer: ModuleInitializer,
 }
+
+unsafe impl Sync for ModuleDef {}
 
 /// Wrapper to enable initializer to be used in const fns.
 pub struct ModuleInitializer(pub for<'py> fn(Python<'py>, &PyModule) -> PyResult<()>);
 
-unsafe impl Sync for ModuleDef {}
+#[cfg(all(feature = "pep489", not(PyPy)))]
+impl ModuleDefSlot {
+    /// Make new module definition slot
+    pub const fn new(slot: i32, value: *mut c_void) -> Self {
+        Self(ffi::PyModuleDef_Slot { slot, value })
+    }
+}
 
 impl ModuleDef {
     /// Make new module definition with given module name.
@@ -27,7 +47,8 @@ impl ModuleDef {
     pub const unsafe fn new(
         name: &'static str,
         doc: &'static str,
-        initializer: ModuleInitializer,
+        #[cfg(all(feature = "pep489", not(PyPy)))] slots: *mut ffi::PyModuleDef_Slot,
+        #[cfg(any(not(feature = "pep489"), PyPy))] initializer: ModuleInitializer,
     ) -> Self {
         const INIT: ffi::PyModuleDef = ffi::PyModuleDef {
             m_base: ffi::PyModuleDef_HEAD_INIT,
@@ -44,15 +65,49 @@ impl ModuleDef {
         let ffi_def = UnsafeCell::new(ffi::PyModuleDef {
             m_name: name.as_ptr() as *const _,
             m_doc: doc.as_ptr() as *const _,
+            #[cfg(all(feature = "pep489", not(PyPy)))]
+            m_slots: slots,
             ..INIT
         });
 
         ModuleDef {
             ffi_def,
+            #[cfg(any(not(feature = "pep489"), PyPy))]
             initializer,
         }
     }
+
+    /// Return module def
+    #[cfg(all(feature = "pep489", not(PyPy)))]
+    pub fn module_def(&'static self) -> *mut ffi::PyModuleDef {
+        self.ffi_def.get()
+    }
+
     /// Builds a module using user given initializer. Used for [`#[pymodule]`][crate::pymodule].
+    #[cfg(all(feature = "pep489", not(PyPy)))]
+    pub fn make_module(&'static self, py: Python<'_>) -> PyResult<PyObject> {
+        let module_spec_type = py.import("importlib.machinery")?.getattr("ModuleSpec")?;
+        let module = unsafe {
+            let mod_def = self.ffi_def.get();
+            // Mock a ModuleSpec object just good enough for PyModule_FromDefAndSpec()
+            // an object with just a name attribute.
+            let module_name = CStr::from_ptr((*mod_def).m_name);
+            let args = (module_name.to_str()?, py.None());
+            let spec = module_spec_type.call1(args)?;
+            let module = Py::<PyModule>::from_owned_ptr_or_err(
+                py,
+                ffi::PyModule_FromDefAndSpec(mod_def, spec.as_ptr()),
+            )?;
+            if ffi::PyModule_ExecDef(module.as_ptr(), mod_def) != 0 {
+                return Err(PyErr::fetch(py));
+            }
+            module
+        };
+        Ok(module.into())
+    }
+
+    /// Builds a module using user given initializer. Used for [`#[pymodule]`][crate::pymodule].
+    #[cfg(any(not(feature = "pep489"), PyPy))]
     pub fn make_module(&'static self, py: Python<'_>) -> PyResult<PyObject> {
         let module = unsafe {
             Py::<PyModule>::from_owned_ptr_or_err(py, ffi::PyModule_Create(self.ffi_def.get()))?
@@ -60,10 +115,12 @@ impl ModuleDef {
         (self.initializer.0)(py, module.as_ref(py))?;
         Ok(module.into())
     }
+
     /// Implementation of `PyInit_foo` functions generated in [`#[pymodule]`][crate::pymodule]..
     ///
     /// # Safety
     /// The Python GIL must be held.
+    #[cfg(any(not(feature = "pep489"), PyPy))]
     pub unsafe fn module_init(&'static self) -> *mut ffi::PyObject {
         let pool = GILPool::new();
         let py = pool.python();
@@ -92,7 +149,7 @@ impl ModuleDef {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(not(feature = "pep489"), PyPy)))]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
