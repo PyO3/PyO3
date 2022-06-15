@@ -21,6 +21,7 @@ use syn::ext::IdentExt;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{parse_quote, spanned::Spanned, Result, Token};
+use crate::inspect::generate_class_inspection;
 
 /// If the class is derived from a Rust `struct` or `enum`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -223,10 +224,10 @@ pub fn build_py_class(
 }
 
 /// `#[pyo3()]` options for pyclass fields
-struct FieldPyO3Options {
-    get: bool,
-    set: bool,
-    name: Option<NameAttribute>,
+pub(crate) struct FieldPyO3Options {
+    pub(crate) get: bool,
+    pub(crate) set: bool,
+    pub(crate) name: Option<NameAttribute>,
 }
 
 enum FieldPyO3Option {
@@ -288,7 +289,7 @@ impl FieldPyO3Options {
     }
 }
 
-fn get_class_python_name<'a>(cls: &'a syn::Ident, args: &'a PyClassArgs) -> Cow<'a, syn::Ident> {
+pub(crate) fn get_class_python_name<'a>(cls: &'a syn::Ident, args: &'a PyClassArgs) -> Cow<'a, syn::Ident> {
     args.options
         .name
         .as_ref()
@@ -305,6 +306,8 @@ fn impl_class(
     krate: syn::Path,
 ) -> syn::Result<TokenStream> {
     let pytypeinfo_impl = impl_pytypeinfo(cls, args, Some(&args.options.deprecations));
+
+    let class_info = generate_class_inspection(cls, args, &field_options);
 
     let py_class_impl = PyClassImplsBuilder::new(
         cls,
@@ -323,6 +326,8 @@ fn impl_class(
             #pytypeinfo_impl
 
             #py_class_impl
+
+            #class_info
         };
     })
 }

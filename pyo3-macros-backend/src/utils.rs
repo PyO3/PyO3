@@ -1,6 +1,7 @@
+// Copyright (c) 2017-present PyO3 Project and Contributors
+
 use std::borrow::Cow;
 
-// Copyright (c) 2017-present PyO3 Project and Contributors
 use proc_macro2::{Span, TokenStream};
 use quote::ToTokens;
 use syn::{spanned::Spanned, Ident};

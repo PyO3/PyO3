@@ -14,6 +14,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote, ToTokens};
 use syn::Ident;
 use syn::{ext::IdentExt, spanned::Spanned, Result};
+use crate::inspect::generate_fields_inspection;
 
 pub enum GeneratedPyMethod {
     Method(TokenStream),
@@ -23,8 +24,8 @@ pub enum GeneratedPyMethod {
 
 pub struct PyMethod<'a> {
     kind: PyMethodKind,
-    method_name: String,
-    spec: FnSpec<'a>,
+    pub(crate) method_name: String,
+    pub(crate) spec: FnSpec<'a>,
 }
 
 enum PyMethodKind {
@@ -167,14 +168,16 @@ pub fn gen_py_method(
     sig: &mut syn::Signature,
     meth_attrs: &mut Vec<syn::Attribute>,
     options: PyFunctionOptions,
-) -> Result<GeneratedPyMethod> {
+) -> Result<(GeneratedPyMethod, TokenStream, Ident)> {
     check_generic(sig)?;
     ensure_not_async_fn(sig)?;
     ensure_function_options_valid(&options)?;
     let method = PyMethod::parse(sig, &mut *meth_attrs, options)?;
     let spec = &method.spec;
 
-    Ok(match (method.kind, &spec.tp) {
+    let (interface, info_ident) = generate_fields_inspection(cls, &method);
+
+    let result = match (method.kind, &spec.tp) {
         // Class attributes go before protos so that class attributes can be used to set proto
         // method to None.
         (_, FnType::ClassAttribute) => {
@@ -225,7 +228,9 @@ pub fn gen_py_method(
         (_, FnType::FnModule) => {
             unreachable!("methods cannot be FnModule")
         }
-    })
+    };
+
+    Ok((result, interface, info_ident))
 }
 
 pub fn check_generic(sig: &syn::Signature) -> syn::Result<()> {

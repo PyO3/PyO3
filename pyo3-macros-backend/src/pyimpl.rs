@@ -12,11 +12,8 @@ use crate::{
 use proc_macro2::TokenStream;
 use pymethod::GeneratedPyMethod;
 use quote::{format_ident, quote};
-use syn::{
-    parse::{Parse, ParseStream},
-    spanned::Spanned,
-    Result,
-};
+use syn::{parse::{Parse, ParseStream}, spanned::Spanned, Result};
+use crate::inspect::generate_impl_inspection;
 
 /// The mechanism used to collect `#[pymethods]` into the type object
 #[derive(Copy, Clone)]
@@ -94,6 +91,7 @@ pub fn impl_methods(
 ) -> syn::Result<TokenStream> {
     let mut trait_impls = Vec::new();
     let mut proto_impls = Vec::new();
+    let mut field_infos = Vec::new();
     let mut methods = Vec::new();
 
     let mut implemented_proto_fragments = HashSet::new();
@@ -103,7 +101,10 @@ pub fn impl_methods(
             syn::ImplItem::Method(meth) => {
                 let mut fun_options = PyFunctionOptions::from_attrs(&mut meth.attrs)?;
                 fun_options.krate = fun_options.krate.or_else(|| options.krate.clone());
-                match pymethod::gen_py_method(ty, &mut meth.sig, &mut meth.attrs, fun_options)? {
+                let (method, interface, field_info) = pymethod::gen_py_method(ty, &mut meth.sig, &mut meth.attrs, fun_options)?;
+                trait_impls.push(interface);
+                field_infos.push(field_info);
+                match method {
                     GeneratedPyMethod::Method(token_stream) => {
                         let attrs = get_cfg_attributes(&meth.attrs);
                         methods.push(quote!(#(#attrs)* #token_stream));
@@ -143,6 +144,9 @@ pub fn impl_methods(
     }
 
     add_shared_proto_slots(ty, &mut proto_impls, implemented_proto_fragments);
+
+    let impl_info = generate_impl_inspection(ty, field_infos);
+    trait_impls.push(impl_info);
 
     let krate = get_pyo3_crate(&options.krate);
 
