@@ -62,6 +62,10 @@ impl ExampleClass {
     fn __bool__(&self) -> bool {
         self.value != 0
     }
+
+    fn __del__(&mut self) {
+        self._custom_attr = None;
+    }
 }
 
 fn make_example(py: Python<'_>) -> &PyCell<ExampleClass> {
@@ -162,6 +166,16 @@ fn test_bool() {
         assert!(example_py.is_true().unwrap());
         example_py.borrow_mut().value = 0;
         assert!(!example_py.is_true().unwrap());
+    })
+}
+
+#[test]
+fn test_del() {
+    Python::with_gil(|py| {
+        let example_py = make_example(py);
+        example_py.setattr("special_custom_attr", 15).unwrap();
+        py_run!(py, example_py, "example_py.__del__()");
+        assert!(example_py.getattr("special_custom_attr").unwrap().is_none());
     })
 }
 

@@ -1,4 +1,4 @@
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::iter::IterNextOutput;
 use pyo3::prelude::*;
 use pyo3::types::PyType;
@@ -58,10 +58,44 @@ impl AssertingBaseClass {
     }
 }
 
+#[pyclass]
+struct PyClassDel {
+    count: Option<usize>,
+}
+
+#[pymethods]
+impl PyClassDel {
+    #[new]
+    pub fn new() -> Self {
+        PyClassDel { count: Some(0) }
+    }
+
+    fn __del__(&mut self) {
+        self.count = None;
+    }
+}
+
+#[pyclass]
+struct PyClassDelError {}
+
+#[pymethods]
+impl PyClassDelError {
+    #[new]
+    pub fn new() -> Self {
+        PyClassDelError {}
+    }
+
+    fn __del__(&mut self) -> PyResult<()> {
+        Err(PyRuntimeError::new_err("__del__ error"))
+    }
+}
+
 #[pymodule]
 pub fn pyclasses(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_class::<EmptyClass>()?;
     m.add_class::<PyClassIter>()?;
     m.add_class::<AssertingBaseClass>()?;
+    m.add_class::<PyClassDel>()?;
+    m.add_class::<PyClassDelError>()?;
     Ok(())
 }

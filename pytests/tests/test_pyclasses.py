@@ -1,3 +1,6 @@
+import sys
+from unittest import mock
+
 import pytest
 from pyo3_pytests import pyclasses
 
@@ -36,3 +39,16 @@ def test_new_classmethod():
     _ = AssertingSubClass(expected_type=AssertingSubClass)
     with pytest.raises(ValueError):
         _ = AssertingSubClass(expected_type=str)
+
+
+def test_del():
+    d = pyclasses.PyClassDel()
+    del d
+
+
+@pytest.mark.skipif(sys.version_info < (3, 8), reason="requires python3.8 or higher")
+def test_del_error():
+    with mock.patch("sys.unraisablehook") as unraisablehook:
+        d = pyclasses.PyClassDelError()
+        del d
+        assert unraisablehook.called

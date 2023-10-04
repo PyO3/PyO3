@@ -97,7 +97,10 @@ impl PyTypeBuilder {
     unsafe fn push_slot<T>(&mut self, slot: c_int, pfunc: *mut T) {
         match slot {
             ffi::Py_tp_new => self.has_new = true,
-            ffi::Py_tp_dealloc => self.has_dealloc = true,
+            ffi::Py_tp_dealloc => {
+                self.has_dealloc = true;
+                self.class_flags |= ffi::Py_TPFLAGS_HAVE_FINALIZE;
+            }
             ffi::Py_mp_subscript => self.has_getitem = true,
             ffi::Py_mp_ass_subscript => self.has_setitem = true,
             ffi::Py_tp_traverse => {

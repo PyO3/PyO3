@@ -114,6 +114,10 @@ given signatures should be interpreted as follows:
   - `__call__(<self>, ...) -> object` - here, any argument list can be defined
     as for normal `pymethods`
 
+  - `__del__(<self>) -> ()`
+
+    Called when the instance is about to be destroyed. This is also called a finalizer or (improperly) a destructor.
+
 ### Iterable objects
 
 Iterators can be defined using these methods:

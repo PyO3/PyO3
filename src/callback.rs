@@ -17,12 +17,16 @@ impl PyCallbackOutput for *mut ffi::PyObject {
     const ERR_VALUE: Self = std::ptr::null_mut();
 }
 
-impl PyCallbackOutput for std::os::raw::c_int {
+impl PyCallbackOutput for c_int {
     const ERR_VALUE: Self = -1;
 }
 
 impl PyCallbackOutput for ffi::Py_ssize_t {
     const ERR_VALUE: Self = -1;
+}
+
+impl PyCallbackOutput for () {
+    const ERR_VALUE: Self = ();
 }
 
 /// Convert the result of callback function into the appropriate return value.
@@ -61,16 +65,16 @@ impl IntoPyCallbackOutput<Self> for *mut ffi::PyObject {
     }
 }
 
-impl IntoPyCallbackOutput<std::os::raw::c_int> for () {
+impl IntoPyCallbackOutput<c_int> for () {
     #[inline]
-    fn convert(self, _: Python<'_>) -> PyResult<std::os::raw::c_int> {
+    fn convert(self, _: Python<'_>) -> PyResult<c_int> {
         Ok(0)
     }
 }
 
-impl IntoPyCallbackOutput<std::os::raw::c_int> for bool {
+impl IntoPyCallbackOutput<c_int> for bool {
     #[inline]
-    fn convert(self, _: Python<'_>) -> PyResult<std::os::raw::c_int> {
+    fn convert(self, _: Python<'_>) -> PyResult<c_int> {
         Ok(self as c_int)
     }
 }

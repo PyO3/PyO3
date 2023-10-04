@@ -82,6 +82,8 @@ trampolines!(
         arg2: *mut ffi::PyObject,
     ) -> *mut ffi::PyObject;
 
+    pub fn destructor(slf: *mut ffi::PyObject) -> ();
+
     pub fn getiterfunc(slf: *mut ffi::PyObject) -> *mut ffi::PyObject;
 
     pub fn hashfunc(slf: *mut ffi::PyObject) -> ffi::Py_hash_t;

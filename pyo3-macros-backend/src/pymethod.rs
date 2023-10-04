@@ -94,6 +94,7 @@ impl PyMethodKind {
             "__getbuffer__" => PyMethodKind::Proto(PyMethodProtoKind::Slot(&__GETBUFFER__)),
             "__releasebuffer__" => PyMethodKind::Proto(PyMethodProtoKind::Slot(&__RELEASEBUFFER__)),
             "__clear__" => PyMethodKind::Proto(PyMethodProtoKind::Slot(&__CLEAR__)),
+            "__del__" => PyMethodKind::Proto(PyMethodProtoKind::Slot(&__DEL__)),
             // Protocols implemented through traits
             "__getattribute__" => {
                 PyMethodKind::Proto(PyMethodProtoKind::SlotFragment(&__GETATTRIBUTE__))
@@ -877,6 +878,9 @@ const __RELEASEBUFFER__: SlotDef = SlotDef::new("Py_bf_releasebuffer", "releaseb
 const __CLEAR__: SlotDef = SlotDef::new("Py_tp_clear", "inquiry")
     .arguments(&[])
     .ret_ty(Ty::Int);
+const __DEL__: SlotDef = SlotDef::new("Py_tp_finalize", "destructor")
+    .arguments(&[])
+    .ret_ty(Ty::Void);
 
 #[derive(Clone, Copy)]
 enum Ty {
