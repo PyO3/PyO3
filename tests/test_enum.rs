@@ -73,10 +73,59 @@ fn test_enum_eq_incomparable() {
     })
 }
 
+#[test]
+fn test_enum_compare_by_identity() {
+    Python::with_gil(|py| {
+        #[allow(non_snake_case)]
+        let MyEnum = py.get_type::<MyEnum>();
+        py_run!(
+            py,
+            MyEnum,
+            r#"
+        assert MyEnum.Variant is MyEnum.Variant
+        assert MyEnum.Variant is not MyEnum.OtherVariant
+        assert (MyEnum.Variant is not MyEnum.Variant) == False
+        "#
+        );
+    })
+}
+
+#[pyclass]
+struct MyEnumHoldingStruct {
+    #[pyo3(get)]
+    my_enum: MyEnum,
+}
+
+#[pymethods]
+impl MyEnumHoldingStruct {
+    #[new]
+    fn new() -> Self {
+        Self {
+            my_enum: MyEnum::Variant,
+        }
+    }
+}
+
+#[test]
+fn test_struct_holding_enum_compare_enum_by_identity() {
+    Python::with_gil(|py| {
+        #[allow(non_snake_case)]
+        let MyEnum = py.get_type::<MyEnum>();
+        #[allow(non_snake_case)]
+        let MyEnumHoldingStruct = py.get_type::<MyEnumHoldingStruct>();
+        py_run!(py, MyEnumHoldingStruct MyEnum, r#"
+        my_enum_holding_struct = MyEnumHoldingStruct()
+        assert my_enum_holding_struct.my_enum is MyEnum.Variant
+        assert my_enum_holding_struct.my_enum is not MyEnum.OtherVariant
+        "#);
+    })
+}
+
 #[pyclass]
 enum CustomDiscriminant {
     One = 1,
     Two = 2,
+    Four = 4,
 }
 
 #[test]
@@ -91,6 +140,25 @@ fn test_custom_discriminant() {
         assert CustomDiscriminant.Two == two
         assert one != two
         "#);
+    })
+}
+
+#[test]
+fn test_custom_discriminant_comparison_by_identity() {
+    Python::with_gil(|py| {
+        #[allow(non_snake_case)]
+        let CustomDiscriminant = py.get_type::<CustomDiscriminant>();
+        py_run!(
+            py,
+            CustomDiscriminant,
+            r#"
+        assert CustomDiscriminant.One is CustomDiscriminant.One
+        assert CustomDiscriminant.Two is CustomDiscriminant.Two
+        assert CustomDiscriminant.Four is CustomDiscriminant.Four
+        assert CustomDiscriminant.One is not CustomDiscriminant.Two
+        assert CustomDiscriminant.Two is not CustomDiscriminant.Four
+        "#
+        );
     })
 }
 

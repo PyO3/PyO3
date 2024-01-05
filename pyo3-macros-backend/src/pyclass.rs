@@ -333,6 +333,24 @@ fn get_class_python_name<'a>(cls: &'a syn::Ident, args: &'a PyClassArgs) -> Cow<
         .unwrap_or_else(|| Cow::Owned(cls.unraw()))
 }
 
+fn impl_into_py_class(cls: &syn::Ident, attr: &PyClassArgs) -> Option<TokenStream> {
+    let cls = cls;
+    let attr = attr;
+
+    // If #cls is not extended type, we allow Self->PyObject conversion
+    if attr.options.extends.is_some() {
+        return None;
+    }
+
+    Some(quote! {
+        impl _pyo3::IntoPy<_pyo3::PyObject> for #cls {
+            fn into_py(self, py: _pyo3::Python) -> _pyo3::PyObject {
+                _pyo3::IntoPy::into_py(_pyo3::Py::new(py, self).unwrap(), py)
+            }
+        }
+    })
+}
+
 fn impl_class(
     cls: &syn::Ident,
     args: &PyClassArgs,
@@ -354,6 +372,7 @@ fn impl_class(
             field_options,
         )?,
         vec![],
+        impl_into_py_class(cls, args),
     )
     .doc(doc)
     .impl_all()?;
@@ -500,6 +519,33 @@ impl EnumVariantPyO3Options {
     }
 }
 
+fn impl_into_py_enum(cls: &syn::Ident, variants: &[PyClassEnumVariant<'_>]) -> TokenStream {
+    let number_of_variants = variants.len();
+
+    let variants_to_initial_value_index = variants.iter().enumerate().map(|(index, variant)| {
+        let variant_name = variant.ident;
+        quote! { #cls::#variant_name => #index, }
+    });
+
+    let initial_values = variants.iter().map(|variant| {
+        let variant_name = variant.ident;
+        quote!(_pyo3::Py::new(py, #cls::#variant_name).unwrap())
+    });
+
+    quote! {
+        impl _pyo3::IntoPy<_pyo3::PyObject> for #cls {
+            fn into_py(self, py: _pyo3::Python) -> _pyo3::PyObject {
+                static SINGLETON_PER_VARIANT: _pyo3::once_cell::GILOnceCell<[_pyo3::Py<#cls>; #number_of_variants]> = _pyo3::once_cell::GILOnceCell::new();
+                let index = match self {
+                    #(#variants_to_initial_value_index)*
+                };
+                let singleton = &SINGLETON_PER_VARIANT.get_or_init(py, || [#(#initial_values),*])[index];
+                _pyo3::IntoPy::into_py(::std::clone::Clone::clone(singleton), py)
+            }
+        }
+    }
+}
+
 fn impl_enum(
     enum_: PyClassEnum<'_>,
     args: &PyClassArgs,
@@ -507,6 +553,7 @@ fn impl_enum(
     methods_type: PyClassMethodsType,
 ) -> Result<TokenStream> {
     let krate = get_pyo3_crate(&args.options.krate);
+
     let cls = enum_.ident;
     let ty: syn::Type = syn::parse_quote!(#cls);
     let variants = enum_.variants;
@@ -603,6 +650,7 @@ fn impl_enum(
         methods_type,
         enum_default_methods(cls, variants.iter().map(|v| (v.ident, v.python_name(args)))),
         default_slots,
+        Some(impl_into_py_enum(cls, &variants)),
     )
     .doc(doc)
     .impl_all()?;
@@ -770,6 +818,7 @@ struct PyClassImplsBuilder<'a> {
     methods_type: PyClassMethodsType,
     default_methods: Vec<MethodAndMethodDef>,
     default_slots: Vec<MethodAndSlotDef>,
+    into_py: Option<TokenStream>,
     doc: Option<PythonDoc>,
 }
 
@@ -780,6 +829,7 @@ impl<'a> PyClassImplsBuilder<'a> {
         methods_type: PyClassMethodsType,
         default_methods: Vec<MethodAndMethodDef>,
         default_slots: Vec<MethodAndSlotDef>,
+        into_py: Option<TokenStream>,
     ) -> Self {
         Self {
             cls,
@@ -787,6 +837,7 @@ impl<'a> PyClassImplsBuilder<'a> {
             methods_type,
             default_methods,
             default_slots,
+            into_py,
             doc: None,
         }
     }
@@ -866,21 +917,12 @@ impl<'a> PyClassImplsBuilder<'a> {
     }
 
     fn impl_into_py(&self) -> TokenStream {
-        let cls = self.cls;
-        let attr = self.attr;
-        // If #cls is not extended type, we allow Self->PyObject conversion
-        if attr.options.extends.is_none() {
-            quote! {
-                impl _pyo3::IntoPy<_pyo3::PyObject> for #cls {
-                    fn into_py(self, py: _pyo3::Python) -> _pyo3::PyObject {
-                        _pyo3::IntoPy::into_py(_pyo3::Py::new(py, self).unwrap(), py)
-                    }
-                }
-            }
-        } else {
-            quote! {}
+        match &self.into_py {
+            None => quote! {},
+            Some(implementation) => implementation.clone(),
         }
     }
+
     fn impl_pyclassimpl(&self) -> Result<TokenStream> {
         let cls = self.cls;
         let doc = self.doc.as_ref().map_or(quote! {"\0"}, |doc| quote! {#doc});

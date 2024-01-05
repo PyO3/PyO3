@@ -960,7 +960,9 @@ Note that `text_signature` on `#[new]` is not compatible with compilation in
 
 ## #[pyclass] enums
 
-Currently PyO3 only supports fieldless enums. PyO3 adds a class attribute for each variant, so you can access them in Python without defining `#[new]`. PyO3 also provides default implementations of `__richcmp__` and `__int__`, so they can be compared using `==`:
+Currently PyO3 only supports fieldless enums. 
+PyO3 adds a class attribute for each variant, so you can access them in Python without defining `#[new]`. 
+PyO3 also provides default implementations of `__richcmp__` and `__int__`, so they can be compared using `==`.
 
 ```rust
 # use pyo3::prelude::*;
@@ -978,6 +980,24 @@ Python::with_gil(|py| {
         assert x == cls.Variant
         assert y == cls.OtherVariant
         assert x != y
+    "#)
+})
+```
+You can also compare enums by identity using `is`:
+```rust
+# use pyo3::prelude::*;
+#[pyclass]
+enum MyEnum {
+    Variant,
+    OtherVariant,
+}
+
+Python::with_gil(|py| {
+    let cls = py.get_type::<MyEnum>();
+    pyo3::py_run!(py, cls, r#"
+        assert cls.Variant is cls.Variant
+        assert cls.OtherVariant == cls.OtherVariant
+        assert cls.Variant is not cls.OtherVariant
     "#)
 })
 ```
