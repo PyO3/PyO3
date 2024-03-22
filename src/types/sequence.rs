@@ -490,13 +490,13 @@ impl<'py> BoundSequenceIterator<'py> {
         }
     }
 
-    unsafe fn get_item(&self, index: usize) -> Bound<'py, PyAny> {
-        self.sequence.get_item(index).expect("sequence.get failed")
+    unsafe fn get_item(&self, index: usize) -> PyResult<Bound<'py, PyAny>> {
+        self.sequence.get_item(index)
     }
 }
 
 impl<'py> Iterator for BoundSequenceIterator<'py> {
-    type Item = Bound<'py, PyAny>;
+    type Item = PyResult<Bound<'py, PyAny>>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -546,7 +546,7 @@ impl ExactSizeIterator for BoundSequenceIterator<'_> {
 impl FusedIterator for BoundSequenceIterator<'_> {}
 
 impl<'py> IntoIterator for Bound<'py, PySequence> {
-    type Item = Bound<'py, PyAny>;
+    type Item = PyResult<Bound<'py, PyAny>>;
     type IntoIter = BoundSequenceIterator<'py>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -555,7 +555,7 @@ impl<'py> IntoIterator for Bound<'py, PySequence> {
 }
 
 impl<'py> IntoIterator for &Bound<'py, PySequence> {
-    type Item = Bound<'py, PyAny>;
+    type Item = PyResult<Bound<'py, PyAny>>;
     type IntoIter = BoundSequenceIterator<'py>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -609,7 +609,7 @@ where
 
     let mut v = Vec::with_capacity(seq.len().unwrap_or(0));
     for item in seq.iter() {
-        v.push(item.extract::<T>()?);
+        v.push(item?.extract::<T>()?);
     }
     Ok(v)
 }
@@ -1009,7 +1009,7 @@ mod tests {
             let seq = ob.downcast_bound::<PySequence>(py).unwrap();
             let mut idx = 0;
             for el in seq {
-                assert_eq!(v[idx], el.extract::<i32>().unwrap());
+                assert_eq!(v[idx], el.unwrap().extract::<i32>().unwrap());
                 idx += 1;
             }
             assert_eq!(idx, v.len());
