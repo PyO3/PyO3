@@ -18,6 +18,7 @@ The following sections also contain specific ideas on where to start contributin
 ## Setting up a development environment
 
 To work and develop PyO3, you need Python & Rust installed on your system.
+
 * We encourage the use of [rustup](https://rustup.rs/) to be able to select and choose specific toolchains based on the project.
 * [Pyenv](https://github.com/pyenv/pyenv) is also highly recommended for being able to choose a specific Python version.
 * [virtualenv](https://virtualenv.pypa.io/en/latest/) can also be used with or without Pyenv to use specific installed Python versions.
@@ -26,6 +27,36 @@ To work and develop PyO3, you need Python & Rust installed on your system.
 ### Caveats
 
 * When using pyenv on macOS, installing a Python version using `--enable-shared` is required to make it work. i.e `env PYTHON_CONFIGURE_OPTS="--enable-shared" pyenv install 3.7.12`
+
+### Testing, linting, etc. with nox
+
+[`Nox`][nox] is used to automate many of our CI tasks and can be used locally to handle verfication tasks as you code. We recommend running these actions via nox to make use of our prefered configuration options. You can install nox into your global python with pip: `pip install nox` or (recommended) with [`pipx`][pipx] `pip install pipx`, `pipx install nox`
+
+The main nox commands we have implemented are:
+
+* `nox -s test` will run the full suite of recommended rust and python tests (>10 minutes)
+* `nox -s test-rust -- skip-full` will run a short suite of rust tests (2-3 minutes)
+* `nox -s ruff` will check python linting and apply standard formatting rules
+* `nox -s rustfmt` will check basic rust linting and apply standard formatting rules
+* `nox -s clippy` will run clippy to make recommendations on rust style
+* `nox -s bench` will benchmark your rust code
+* `nox -s codspeed` will run our suite of rust and python performance tests
+* `nox -s coverage` will analyse test coverage and output `coverage.json` (alternatively: `nox -s coverage lcov` outputs `lcov.info`)
+* `nox -s check-guide` will use [`lychee`][lychee] to check all the links in the guide and doc comments.
+
+Use  `nox -l` to list the full set of subcommands you can run.
+
+#### UI Tests
+
+PyO3 uses [`trybuild`][trybuild] to develop UI tests to capture error messages from the Rust compiler for some of the macro functionality.
+
+Because there are several feature combinations for these UI tests, when updating them all (e.g. for a new Rust compiler version) it may be helpful to use the `update-ui-tests` nox session:
+
+```bash
+nox -s update-ui-tests
+```
+
+## Ways to help
 
 ### Help users identify bugs
 
@@ -98,36 +129,22 @@ Tests run with all supported Python versions with the latest stable Rust compile
 
 If you are adding a new feature, you should add it to the `full` feature in our *Cargo.toml** so that it is tested in CI.
 
-You can run these tests yourself with
-`nox`. Use  `nox -l` to list the full set of subcommands you can run.
+You can run these tests yourself with `nox`. The full set of actions run in CI is:
 
-#### Linting Python code
-`nox -s ruff`
+1. `nox -s rustfmt` - everything will abort if fmt has not been run on the code before pushing
+1. `cargo semver-checks check-release` (checks no semver violations based on currently released version of Pyo3)
+1. `nox -s set-minimal-package-versions` & `nox -s check-all`
+1. `nox -s clippy-all` on a matrix of different OS, python and rust architectures
+1. build and test against a matrix of different OS, python and rust architectures
+1. test under valgrind to identify memory leakages
+1. `nox -s coverage` for latest windows, macos and ubuntu
+1. `nox -s test` with a debug build of python
+1. `nox -s test-version-limits`
+1. `nox -s check-feature-powerset` to check conditional compilation
+1. cross-compilation tests
+1. `nox -s check-guide` to build the guide and doc-comments docummentation and use [`lychee`][lychee] to validate all links
 
-#### Linting Rust code
-`nox -s rustfmt`
-
-#### Semver checks
-`cargo semver-checks check-release`
-
-#### Clippy
-`nox -s clippy-all`
-
-#### Tests
-`cargo test --features full`
-
-#### Check all conditional compilation
-`nox -s check-feature-powerset`
-
-#### UI Tests
-
-PyO3 uses [`trybuild`][trybuild] to develop UI tests to capture error messages from the Rust compiler for some of the macro functionality.
-
-Because there are several feature combinations for these UI tests, when updating them all (e.g. for a new Rust compiler version) it may be helpful to use the `update-ui-tests` nox session:
-
-```bash
-nox -s update-ui-tests
-```
+If you wish to validate your code against this suite before raising a PR, then you can manually trigger the CI in github actions.
 
 ### Documenting changes
 
@@ -242,3 +259,5 @@ In the meanwhile, some of our maintainers have personal GitHub sponsorship pages
 [mdbook]: https://rust-lang.github.io/mdBook/cli/index.html
 [lychee]: https://github.com/lycheeverse/lychee
 [nox]: https://github.com/theacodes/nox
+[pipx]: https://pipx.pypa.io/stable/
+[trybuild]: https://github.com/dtolnay/trybuild
