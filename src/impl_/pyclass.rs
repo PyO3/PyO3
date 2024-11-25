@@ -1,13 +1,19 @@
+#[cfg(Py_3_12)]
+use crate::pycell::layout::TypeObjectStrategy;
 use crate::{
     exceptions::{PyAttributeError, PyNotImplementedError, PyRuntimeError, PyValueError},
     ffi,
     impl_::{
         freelist::FreeList,
-        pycell::{GetBorrowChecker, PyClassMutability, PyClassObjectLayout},
+        pycell::{GetBorrowChecker, PyClassMutability},
         pyclass_init::PyObjectInit,
         pymethods::{PyGetterDef, PyMethodDefType},
     },
-    pycell::PyBorrowError,
+    pycell::{
+        layout::{usize_to_py_ssize, PyObjectLayout, PyObjectRecursiveOperations},
+        PyBorrowError,
+    },
+    type_object::PyLayout,
     types::{any::PyAnyMethods, PyBool},
     Borrowed, BoundObject, IntoPyObject, IntoPyObjectExt, Py, PyAny, PyClass, PyErr, PyRef,
     PyResult, PyTypeInfo, Python,
@@ -33,14 +39,14 @@ pub use probes::*;
 
 /// Gets the offset of the dictionary from the start of the object in bytes.
 #[inline]
-pub fn dict_offset<T: PyClass>() -> ffi::Py_ssize_t {
-    PyClassObject::<T>::dict_offset()
+pub fn dict_offset<T: PyClass>() -> PyObjectOffset {
+    PyObjectLayout::dict_offset::<T>()
 }
 
 /// Gets the offset of the weakref list from the start of the object in bytes.
 #[inline]
-pub fn weaklist_offset<T: PyClass>() -> ffi::Py_ssize_t {
-    PyClassObject::<T>::weaklist_offset()
+pub fn weaklist_offset<T: PyClass>() -> PyObjectOffset {
+    PyObjectLayout::weaklist_offset::<T>()
 }
 
 /// Represents the `__dict__` field for `#[pyclass]`.
@@ -160,19 +166,19 @@ unsafe impl Sync for PyClassItems {}
 /// Users are discouraged from implementing this trait manually; it is a PyO3 implementation detail
 /// and may be changed at any time.
 pub trait PyClassImpl: Sized + 'static {
-    /// #[pyclass(subclass)]
+    /// `#[pyclass(subclass)]`
     const IS_BASETYPE: bool = false;
 
-    /// #[pyclass(extends=...)]
+    /// `#[pyclass(extends=...)]`
     const IS_SUBCLASS: bool = false;
 
-    /// #[pyclass(mapping)]
+    /// `#[pyclass(mapping)]`
     const IS_MAPPING: bool = false;
 
-    /// #[pyclass(sequence)]
+    /// `#[pyclass(sequence)]`
     const IS_SEQUENCE: bool = false;
 
-    /// Base class
+    /// Base class (the direct parent configured via `#[pyclass(extends=...)]`)
     type BaseType: PyTypeInfo + PyClassBaseType;
 
     /// Immutable or mutable
@@ -205,13 +211,17 @@ pub trait PyClassImpl: Sized + 'static {
 
     fn items_iter() -> PyClassItemsIter;
 
+    /// Used to provide the `__dictoffset__` slot
+    /// (equivalent to [tp_dictoffset](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_dictoffset))
     #[inline]
-    fn dict_offset() -> Option<ffi::Py_ssize_t> {
+    fn dict_offset() -> Option<PyObjectOffset> {
         None
     }
 
+    /// Used to provide the `__weaklistoffset__` slot
+    /// (equivalent to [tp_weaklistoffset](https://docs.python.org/3/c-api/typeobj.html#c.PyTypeObject.tp_weaklistoffset)
     #[inline]
-    fn weaklist_offset() -> Option<ffi::Py_ssize_t> {
+    fn weaklist_offset() -> Option<PyObjectOffset> {
         None
     }
 
@@ -903,7 +913,7 @@ macro_rules! generate_pyclass_richcompare_slot {
 }
 pub use generate_pyclass_richcompare_slot;
 
-use super::{pycell::PyClassObject, pymethods::BoundRef};
+use super::pymethods::BoundRef;
 
 /// Implements a freelist.
 ///
@@ -1116,8 +1126,8 @@ impl<T> PyClassThreadChecker<T> for ThreadCheckerImpl {
     private_impl! {}
 }
 
-/// Trait denoting that this class is suitable to be used as a base type for PyClass.
-
+/// Trait denoting that this class is suitable to be used as a base type for PyClass
+/// (meaning it can be used with `#[pyclass(extends=...)]`).
 #[cfg_attr(
     all(diagnostic_namespace, Py_LIMITED_API),
     diagnostic::on_unimplemented(
@@ -1136,24 +1146,28 @@ impl<T> PyClassThreadChecker<T> for ThreadCheckerImpl {
     )
 )]
 pub trait PyClassBaseType: Sized {
-    type LayoutAsBase: PyClassObjectLayout<Self>;
-    type BaseNativeType;
+    /// A struct that describes the memory layout of a `ffi:PyObject` with the type of `Self`.
+    /// Only valid when `<T as PyTypeInfo>::OPAQUE == false`.
+    type StaticLayout: PyLayout<Self>;
+    /// The nearest ancestor in the inheritance tree that is a native type (not a `#[pyclass]` annotated struct).
+    type BaseNativeType: PyTypeInfo;
+    /// The implementation for recursive operations that walk the inheritance tree back to the `BaseNativeType`.
+    /// (two implementations: one for native type, one for pyclass)
+    type RecursiveOperations: PyObjectRecursiveOperations;
+    /// The implementation for constructing new a new `ffi::PyObject` of this type.
+    /// (two implementations: one for native type, one for pyclass)
     type Initializer: PyObjectInit<Self>;
     type PyClassMutability: PyClassMutability;
 }
 
 /// Implementation of tp_dealloc for pyclasses without gc
 pub(crate) unsafe extern "C" fn tp_dealloc<T: PyClass>(obj: *mut ffi::PyObject) {
-    crate::impl_::trampoline::dealloc(obj, PyClassObject::<T>::tp_dealloc)
+    crate::impl_::trampoline::dealloc(obj, PyObjectLayout::deallocate::<T>)
 }
 
 /// Implementation of tp_dealloc for pyclasses with gc
 pub(crate) unsafe extern "C" fn tp_dealloc_with_gc<T: PyClass>(obj: *mut ffi::PyObject) {
-    #[cfg(not(PyPy))]
-    {
-        ffi::PyObject_GC_UnTrack(obj.cast());
-    }
-    crate::impl_::trampoline::dealloc(obj, PyClassObject::<T>::tp_dealloc)
+    crate::impl_::trampoline::dealloc(obj, PyObjectLayout::deallocate_with_gc::<T>)
 }
 
 pub(crate) unsafe extern "C" fn get_sequence_item_from_mapping(
@@ -1187,6 +1201,29 @@ pub(crate) unsafe extern "C" fn assign_sequence_item_from_mapping(
     result
 }
 
+/// Offset of a field within a PyObject in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PyObjectOffset {
+    /// An offset relative to the start of the object
+    Absolute(ffi::Py_ssize_t),
+    /// An offset relative to the start of the subclass-specific data.
+    /// Only allowed when basicsize is negative (which is only allowed for python >=3.12).
+    /// <https://docs.python.org/3.12/c-api/structures.html#c.Py_RELATIVE_OFFSET>
+    Relative(ffi::Py_ssize_t),
+}
+
+impl std::ops::Add<usize> for PyObjectOffset {
+    type Output = PyObjectOffset;
+
+    fn add(self, rhs: usize) -> Self::Output {
+        let rhs = usize_to_py_ssize(rhs);
+        match self {
+            PyObjectOffset::Absolute(offset) => PyObjectOffset::Absolute(offset + rhs),
+            PyObjectOffset::Relative(offset) => PyObjectOffset::Relative(offset + rhs),
+        }
+    }
+}
+
 /// Helper trait to locate field within a `#[pyclass]` for a `#[pyo3(get)]`.
 ///
 /// Below MSRV 1.77 we can't use `std::mem::offset_of!`, and the replacement in
@@ -1196,13 +1233,13 @@ pub(crate) unsafe extern "C" fn assign_sequence_item_from_mapping(
 ///
 /// The trait is unsafe to implement because producing an incorrect offset will lead to UB.
 pub unsafe trait OffsetCalculator<T: PyClass, U> {
-    /// Offset to the field within a `PyClassObject<T>`, in bytes.
-    fn offset() -> usize;
+    /// Offset to the field within a PyObject
+    fn offset() -> PyObjectOffset;
 }
 
 // Used in generated implementations of OffsetCalculator
-pub fn class_offset<T: PyClass>() -> usize {
-    offset_of!(PyClassObject<T>, contents)
+pub fn subclass_offset<T: PyClass>() -> PyObjectOffset {
+    PyObjectLayout::contents_offset::<T>()
 }
 
 // Used in generated implementations of OffsetCalculator
@@ -1281,11 +1318,22 @@ impl<
     pub fn generate(&self, name: &'static CStr, doc: &'static CStr) -> PyMethodDefType {
         use crate::pyclass::boolean_struct::private::Boolean;
         if ClassT::Frozen::VALUE {
+            let (offset, flags) = match Offset::offset() {
+                PyObjectOffset::Absolute(offset) => (offset, ffi::Py_READONLY),
+                #[cfg(Py_3_12)]
+                PyObjectOffset::Relative(offset) => {
+                    (offset, ffi::Py_READONLY | ffi::Py_RELATIVE_OFFSET)
+                }
+                #[cfg(not(Py_3_12))]
+                PyObjectOffset::Relative(_) => {
+                    panic!("relative offsets not valid before python 3.12");
+                }
+            };
             PyMethodDefType::StructMember(ffi::PyMemberDef {
                 name: name.as_ptr(),
                 type_code: ffi::Py_T_OBJECT_EX,
-                offset: Offset::offset() as ffi::Py_ssize_t,
-                flags: ffi::Py_READONLY,
+                offset,
+                flags,
                 doc: doc.as_ptr(),
             })
         } else {
@@ -1438,12 +1486,29 @@ unsafe fn ensure_no_mutable_alias<'py, ClassT: PyClass>(
 
 /// calculates the field pointer from an PyObject pointer
 #[inline]
-fn field_from_object<ClassT, FieldT, Offset>(obj: *mut ffi::PyObject) -> *mut FieldT
+fn field_from_object<ClassT, FieldT, Offset>(py: Python<'_>, obj: *mut ffi::PyObject) -> *mut FieldT
 where
     ClassT: PyClass,
     Offset: OffsetCalculator<ClassT, FieldT>,
 {
-    unsafe { obj.cast::<u8>().add(Offset::offset()).cast::<FieldT>() }
+    let (base, offset) = match Offset::offset() {
+        PyObjectOffset::Absolute(offset) => (obj.cast::<u8>(), offset),
+        #[cfg(Py_3_12)]
+        PyObjectOffset::Relative(offset) => {
+            // Safety: obj must be a valid `PyObject` whose type is a subtype of `ClassT`
+            let contents = unsafe {
+                PyObjectLayout::get_contents_ptr::<ClassT>(obj, TypeObjectStrategy::lazy(py))
+            };
+            (contents.cast::<u8>(), offset)
+        }
+        #[cfg(not(Py_3_12))]
+        PyObjectOffset::Relative(_) => {
+            let _ = py;
+            panic!("relative offsets not valid before python 3.12");
+        }
+    };
+    // Safety: conditions for pointer addition must be met
+    unsafe { base.add(offset as usize) }.cast::<FieldT>()
 }
 
 #[allow(deprecated)]
@@ -1456,7 +1521,7 @@ fn pyo3_get_value_topyobject<
     obj: *mut ffi::PyObject,
 ) -> PyResult<*mut ffi::PyObject> {
     let _holder = unsafe { ensure_no_mutable_alias::<ClassT>(py, &obj)? };
-    let value = field_from_object::<ClassT, FieldT, Offset>(obj);
+    let value = field_from_object::<ClassT, FieldT, Offset>(py, obj);
 
     // SAFETY: Offset is known to describe the location of the value, and
     // _holder is preventing mutable aliasing
@@ -1473,7 +1538,7 @@ where
     Offset: OffsetCalculator<ClassT, FieldT>,
 {
     let _holder = unsafe { ensure_no_mutable_alias::<ClassT>(py, &obj)? };
-    let value = field_from_object::<ClassT, FieldT, Offset>(obj);
+    let value = field_from_object::<ClassT, FieldT, Offset>(py, obj);
 
     // SAFETY: Offset is known to describe the location of the value, and
     // _holder is preventing mutable aliasing
@@ -1493,7 +1558,7 @@ where
     Offset: OffsetCalculator<ClassT, FieldT>,
 {
     let _holder = unsafe { ensure_no_mutable_alias::<ClassT>(py, &obj)? };
-    let value = field_from_object::<ClassT, FieldT, Offset>(obj);
+    let value = field_from_object::<ClassT, FieldT, Offset>(py, obj);
 
     // SAFETY: Offset is known to describe the location of the value, and
     // _holder is preventing mutable aliasing
@@ -1514,7 +1579,7 @@ fn pyo3_get_value<
     obj: *mut ffi::PyObject,
 ) -> PyResult<*mut ffi::PyObject> {
     let _holder = unsafe { ensure_no_mutable_alias::<ClassT>(py, &obj)? };
-    let value = field_from_object::<ClassT, FieldT, Offset>(obj);
+    let value = field_from_object::<ClassT, FieldT, Offset>(py, obj);
 
     // SAFETY: Offset is known to describe the location of the value, and
     // _holder is preventing mutable aliasing
@@ -1593,6 +1658,8 @@ impl Deprecation {
 #[cfg(test)]
 #[cfg(feature = "macros")]
 mod tests {
+    use crate::pycell::layout::PyClassObjectContents;
+
     use super::*;
 
     #[test]
@@ -1621,9 +1688,14 @@ mod tests {
             Some(PyMethodDefType::StructMember(member)) => {
                 assert_eq!(unsafe { CStr::from_ptr(member.name) }, ffi::c_str!("value"));
                 assert_eq!(member.type_code, ffi::Py_T_OBJECT_EX);
+                #[repr(C)]
+                struct ExpectedLayout {
+                    ob_base: ffi::PyObject,
+                    contents: PyClassObjectContents<FrozenClass>,
+                }
                 assert_eq!(
                     member.offset,
-                    (memoffset::offset_of!(PyClassObject<FrozenClass>, contents)
+                    (memoffset::offset_of!(ExpectedLayout, contents)
                         + memoffset::offset_of!(FrozenClass, value))
                         as ffi::Py_ssize_t
                 );

@@ -2,15 +2,15 @@ use crate::{
     exceptions::PyTypeError,
     ffi,
     impl_::{
-        pycell::PyClassObject,
         pyclass::{
             assign_sequence_item_from_mapping, get_sequence_item_from_mapping, tp_dealloc,
-            tp_dealloc_with_gc, MaybeRuntimePyMethodDef, PyClassItemsIter,
+            tp_dealloc_with_gc, MaybeRuntimePyMethodDef, PyClassItemsIter, PyObjectOffset,
         },
         pymethods::{Getter, PyGetterDef, PyMethodDefType, PySetterDef, Setter, _call_clear},
         trampoline::trampoline,
     },
     internal_tricks::ptr_from_ref,
+    pycell::layout::PyObjectLayout,
     types::{typeobject::PyTypeMethods, PyType},
     Py, PyClass, PyResult, PyTypeInfo, Python,
 };
@@ -18,7 +18,7 @@ use std::{
     collections::HashMap,
     ffi::{CStr, CString},
     os::raw::{c_char, c_int, c_ulong, c_void},
-    ptr,
+    ptr::{self, addr_of_mut},
 };
 
 pub(crate) struct PyClassTypeObject {
@@ -41,13 +41,13 @@ where
         is_mapping: bool,
         is_sequence: bool,
         doc: &'static CStr,
-        dict_offset: Option<ffi::Py_ssize_t>,
-        weaklist_offset: Option<ffi::Py_ssize_t>,
+        dict_offset: Option<PyObjectOffset>,
+        weaklist_offset: Option<PyObjectOffset>,
         is_basetype: bool,
         items_iter: PyClassItemsIter,
         name: &'static str,
         module: Option<&'static str>,
-        size_of: usize,
+        basicsize: ffi::Py_ssize_t,
     ) -> PyResult<PyClassTypeObject> {
         PyTypeBuilder {
             slots: Vec::new(),
@@ -61,6 +61,7 @@ where
             is_mapping,
             is_sequence,
             has_new: false,
+            has_init: false,
             has_dealloc: false,
             has_getitem: false,
             has_setitem: false,
@@ -75,7 +76,7 @@ where
         .offsets(dict_offset, weaklist_offset)
         .set_is_basetype(is_basetype)
         .class_items(items_iter)
-        .build(py, name, module, size_of)
+        .build(py, name, module, basicsize)
     }
 
     unsafe {
@@ -93,7 +94,7 @@ where
             T::items_iter(),
             T::NAME,
             T::MODULE,
-            std::mem::size_of::<PyClassObject<T>>(),
+            PyObjectLayout::basicsize::<T>(),
         )
     }
 }
@@ -115,12 +116,13 @@ struct PyTypeBuilder {
     is_mapping: bool,
     is_sequence: bool,
     has_new: bool,
+    has_init: bool,
     has_dealloc: bool,
     has_getitem: bool,
     has_setitem: bool,
     has_traverse: bool,
     has_clear: bool,
-    dict_offset: Option<ffi::Py_ssize_t>,
+    dict_offset: Option<PyObjectOffset>,
     class_flags: c_ulong,
     // Before Python 3.9, need to patch in buffer methods manually (they don't work in slots)
     #[cfg(all(not(Py_3_9), not(Py_LIMITED_API)))]
@@ -133,6 +135,7 @@ impl PyTypeBuilder {
     unsafe fn push_slot<T>(&mut self, slot: c_int, pfunc: *mut T) {
         match slot {
             ffi::Py_tp_new => self.has_new = true,
+            ffi::Py_tp_init => self.has_init = true,
             ffi::Py_tp_dealloc => self.has_dealloc = true,
             ffi::Py_mp_subscript => self.has_getitem = true,
             ffi::Py_mp_ass_subscript => self.has_setitem = true,
@@ -256,7 +259,11 @@ impl PyTypeBuilder {
                 }
 
                 get_dict = get_dict_impl;
-                closure = dict_offset as _;
+                if let PyObjectOffset::Absolute(offset) = dict_offset {
+                    closure = offset as _;
+                } else {
+                    unreachable!("PyObjectOffset::Relative requires >=3.12");
+                }
             }
 
             property_defs.push(ffi::PyGetSetDef {
@@ -357,20 +364,31 @@ impl PyTypeBuilder {
 
     fn offsets(
         mut self,
-        dict_offset: Option<ffi::Py_ssize_t>,
-        #[allow(unused_variables)] weaklist_offset: Option<ffi::Py_ssize_t>,
+        dict_offset: Option<PyObjectOffset>,
+        #[allow(unused_variables)] weaklist_offset: Option<PyObjectOffset>,
     ) -> Self {
         self.dict_offset = dict_offset;
 
         #[cfg(Py_3_9)]
         {
             #[inline(always)]
-            fn offset_def(name: &'static CStr, offset: ffi::Py_ssize_t) -> ffi::PyMemberDef {
+            fn offset_def(name: &'static CStr, offset: PyObjectOffset) -> ffi::PyMemberDef {
+                let (offset, flags) = match offset {
+                    PyObjectOffset::Absolute(offset) => (offset, ffi::Py_READONLY),
+                    #[cfg(Py_3_12)]
+                    PyObjectOffset::Relative(offset) => {
+                        (offset, ffi::Py_READONLY | ffi::Py_RELATIVE_OFFSET)
+                    }
+                    #[cfg(not(Py_3_12))]
+                    PyObjectOffset::Relative(_) => {
+                        panic!("relative offsets not valid before python 3.12");
+                    }
+                };
                 ffi::PyMemberDef {
                     name: name.as_ptr().cast(),
                     type_code: ffi::Py_T_PYSSIZET,
                     offset,
-                    flags: ffi::Py_READONLY,
+                    flags,
                     doc: std::ptr::null_mut(),
                 }
             }
@@ -400,12 +418,23 @@ impl PyTypeBuilder {
                     (*(*type_object).tp_as_buffer).bf_releasebuffer =
                         builder.buffer_procs.bf_releasebuffer;
 
-                    if let Some(dict_offset) = dict_offset {
-                        (*type_object).tp_dictoffset = dict_offset;
+                    match dict_offset {
+                        Some(PyObjectOffset::Absolute(offset)) => {
+                            (*type_object).tp_dictoffset = offset;
+                        }
+                        Some(PyObjectOffset::Relative(_)) => {
+                            panic!("PyObjectOffset::Relative requires >=3.12")
+                        }
+                        None => {}
                     }
-
-                    if let Some(weaklist_offset) = weaklist_offset {
-                        (*type_object).tp_weaklistoffset = weaklist_offset;
+                    match weaklist_offset {
+                        Some(PyObjectOffset::Absolute(offset)) => {
+                            (*type_object).tp_weaklistoffset = offset;
+                        }
+                        Some(PyObjectOffset::Relative(_)) => {
+                            panic!("PyObjectOffset::Relative requires >=3.12")
+                        }
+                        None => {}
                     }
                 }));
         }
@@ -417,7 +446,7 @@ impl PyTypeBuilder {
         py: Python<'_>,
         name: &'static str,
         module_name: Option<&'static str>,
-        basicsize: usize,
+        basicsize: ffi::Py_ssize_t,
     ) -> PyResult<PyClassTypeObject> {
         // `c_ulong` and `c_uint` have the same size
         // on some platforms (like windows)
@@ -427,8 +456,21 @@ impl PyTypeBuilder {
 
         unsafe { self.push_slot(ffi::Py_tp_base, self.tp_base) }
 
-        if !self.has_new {
-            // Safety: This is the correct slot type for Py_tp_new
+        // Safety: self.tp_base must be a valid PyTypeObject
+        let is_metaclass =
+            unsafe { ffi::PyType_IsSubtype(self.tp_base, addr_of_mut!(ffi::PyType_Type)) } != 0;
+        if is_metaclass {
+            // if the pyclass derives from `type` (is a metaclass) then `tp_new` must not be set.
+            // Metaclasses that override tp_new are not supported.
+            // https://docs.python.org/3/c-api/type.html#c.PyType_FromMetaclass
+            assert!(
+                !self.has_new,
+                "Metaclasses must not specify __new__ (use __init__ instead)"
+            );
+            // To avoid uninitialized memory, __init__ must be defined instead
+            assert!(self.has_init, "Metaclasses must specify __init__");
+        } else if !self.has_new {
+            // Safety: The default constructor is a valid value of tp_new
             unsafe { self.push_slot(ffi::Py_tp_new, no_constructor_defined as *mut c_void) }
         }
 
